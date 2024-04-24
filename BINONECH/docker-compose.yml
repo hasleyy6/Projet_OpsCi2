@@ -1,5 +1,46 @@
 version: "3"
 services:
+
+  zookeeper:
+    image: wurstmeister/zookeeper:latest
+    container_name: zookeeper
+    ports:
+      - '2181:2181'
+    expose:
+      - '2181'
+    networks:
+      - strapi
+
+  kafka:
+    image: wurstmeister/kafka:2.11-1.1.1
+    container_name: kafka
+    ports:
+      - '9092:9092'
+      - '9093:9093'
+    environment:
+      KAFKA_ADVERTISED_LISTENERS: INSIDE://localhost:9093,OUTSIDE://kafka:9092,
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'true'
+      KAFKA_DELETE_TOPIC_ENABLE: 'true'
+      KAFKA_ADVERTISED_PORT: 9092
+      KAFKA_ZOOKEEPER_CONNECT: 'zookeeper:2181'
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKAJS_NO_PARTITIONER_WARNING: '1'
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INSIDE:PLAINTEXT,OUTSIDE:PLAINTEXT
+      KAFKA_LISTENERS: INSIDE://0.0.0.0:9093,OUTSIDE://0.0.0.0:9092
+      KAFKA_INTER_BROKER_LISTENER_NAME: INSIDE
+      KAFKA_NO_LISTENER_AUTHENTICATION_PLAINTEXT: 'true'
+      KAFKA_NO_LISTENER_AUTHENTICATION_SSL: 'true'
+      KAFKA_BROKER_ID: 1
+      KAFKA_LOG_RETENTION_HOURS: 168
+      KAFKA_LOG_RETENTION_BYTES: 1073741824
+      KAFKA_LOG_DIRS: /kafka/logs
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      - zookeeper
+    networks:
+      - strapi
+
   strapi:
     container_name: strapi
     build: .
@@ -46,7 +87,7 @@ services:
       #- ./data:/var/lib/postgresql/data/ # if you want to use a bind folder
 
     ports:
-      - "0:5432"
+      - "5432:5432"
     networks:
       - strapi
 
@@ -58,18 +99,165 @@ services:
     ports:
       - "5173:5173" # Remplacez par les ports appropriés
     depends_on:
+      - strapiDB
       - strapi
+      - dump
     networks:
       - strapi
+  dump:
+    container_name: db-dump
+    image: postgres:12.0-alpine
+    env_file: 
+      - .env
+    command: ["sh", "-c", "export PGPASSWORD=safepassword && pg_dumpall -h strapiDB -U strapi > /dump/backup.sql"]
+
+    volumes:
+      - ./dump:/dump
+    depends_on:
+      - strapiDB
+    networks:
+      - strapi
+  
+  product-producer:
+      image: arthurescriou/product-producer:1.0.0
+      container_name: product-producer
+      build:
+        context : ./product-producer
+        dockerfile: Dockerfile
+      env_file: .env
+      environment:
+        BROKER_1: kafka:9092
+        BROKER_2: kafka:9092
+        BROKER_3: kafka:9092
+        STRAPI_TOKEN: '8654895bc57b46c82fee5c2dacc921536f783729909ec7f285000887f5bd14357038a7d12402800a9352d15bbdb85f9b82955d411cae474204a192efbe0c117cec41249a40126dcb29c7a4ad994271cb099e9051637fe5cbd1a142a7348abd0c8c1283b83d7e47c68cd8fce61f6caeeae65b1e782fbad9518538f72c3878b2a7'
+        STRAPI_URL: http://strapi:1337
+        TOPIC: product
+        ERROR_TOPIC: errors
+        FILE_NAME: products.csv
+      volumes:
+          - ./product-producer/products.csv:/var/lib/products.csv  
+      depends_on:
+          - kafka
+          - strapi
+      networks:
+          - strapi
+
+
+  product-consumer:
+      image: arthurescriou/product-consumer:latest
+      container_name: product-consumer
+      build:
+          context: ./product-consumer
+          dockerfile: Dockerfile
+      environment:
+        BROKER_1: kafka:9092
+        BROKER_2: kafka:9092
+        BROKER_3: kafka:9092
+        STRAPI_TOKEN: '8654895bc57b46c82fee5c2dacc921536f783729909ec7f285000887f5bd14357038a7d12402800a9352d15bbdb85f9b82955d411cae474204a192efbe0c117cec41249a40126dcb29c7a4ad994271cb099e9051637fe5cbd1a142a7348abd0c8c1283b83d7e47c68cd8fce61f6caeeae65b1e782fbad9518538f72c3878b2a7'
+        STRAPI_URL: http://strapi:1337
+        TOPIC: product
+        BEGINNING: 'false' 
+        ERROR_TOPIC: errors
+      depends_on:
+            - kafka
+            - strapi
+      networks:
+            - strapi
+       
+  
+  event-producer:
+      image: arthurescriou/event-producer:1.0.3
+      container_name: event-producer
+      build:
+          context : ./event-producer
+          dockerfile: Dockerfile   
+      environment:
+          BROKER_1: kafka:9092
+          BROKER_2: kafka:9092
+          BROKER_3: kafka:9092
+          TOPIC: event
+          FILE_NAME: events.csv
+          ERROR_TOPIC: errors
+      volumes:
+          - ./event-producer/events.csv:/var/lib/events.csv  
+      
+      networks:
+          - strapi
+
+      depends_on:
+          - kafka
+          - strapi
+          
+          
+  event-consumer:
+      image: arthurescriou/event-consumer:1.0.0
+      container_name: event-consumer
+      build:
+          context: ./event-consumer
+          dockerfile: Dockerfile
+      environment:
+          BROKER_1: kafka:9092
+          BROKER_2: kafka:9092
+          BROKER_3: kafka:9092
+          STRAPI_TOKEN: '8654895bc57b46c82fee5c2dacc921536f783729909ec7f285000887f5bd14357038a7d12402800a9352d15bbdb85f9b82955d411cae474204a192efbe0c117cec41249a40126dcb29c7a4ad994271cb099e9051637fe5cbd1a142a7348abd0c8c1283b83d7e47c68cd8fce61f6caeeae65b1e782fbad9518538f72c3878b2a7'
+          STRAPI_URL: http://strapi:1337
+          TOPIC: event
+          BEGINNING: "false"
+          ERROR_TOPIC: errors
+    
+      networks:
+          - strapi
+
+      depends_on:
+          - kafka
+          - strapi
+
+
+  stock-producer:
+      image: arthurescriou/stock-producer:1.0.1
+      container_name: stock-producer
+      build:
+          context: ./stock-producer
+          dockerfile: Dockerfile
+      environment:
+          BROKER_1: kafka:9092
+          BROKER_2: kafka:9092
+          BROKER_3: kafka:9092
+          TOPIC: stock
+          FILE_NAME: stocks.csv
+      networks:
+          - strapi
+      depends_on:
+          - kafka
+          - strapi
+          
+  stock-consumer:
+      image: arthurescriou/stock-consumer:1.0.0
+      container_name: stock-consumer
+      build:
+          context: ./stock-consumer
+          dockerfile: Dockerfile
+      environment: 
+          BROKER_1: kafka:9092
+          BROKER_2: kafka:9092
+          BROKER_3: kafka:9092
+          STRAPI_TOKEN: '8654895bc57b46c82fee5c2dacc921536f783729909ec7f285000887f5bd14357038a7d12402800a9352d15bbdb85f9b82955d411cae474204a192efbe0c117cec41249a40126dcb29c7a4ad994271cb099e9051637fe5cbd1a142a7348abd0c8c1283b83d7e47c68cd8fce61f6caeeae65b1e782fbad9518538f72c3878b2a7'
+          STRAPI_URL: http://strapi:1337
+          TOPIC: stock
+          BEGINNING: "false"
+          ERROR_TOPIC: errors
+      networks:
+          - strapi
+      depends_on:
+          - kafka
+          - strapi
 
   
-    
-
 
 volumes:
   strapi-data:
 
-networks:
+networks: 
   strapi:
-    name: Strapi
+    name: strapi
     driver: bridge

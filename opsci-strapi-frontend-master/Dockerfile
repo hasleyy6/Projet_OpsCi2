@@ -17,7 +17,7 @@ COPY . .
 # Construire l'application pour la production
 RUN npm run build
 
-ENV PORT=5173
+#ENV PORT=5173
 
 # Installer serve pour servir l'application sur le port 3000
 CMD ["npm", "run", "dev"]
